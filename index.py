@@ -2,14 +2,14 @@
 import os
 import re
 import sys
+from mrjob.job import MRJob
+from mrjob.step import MRStep
 from collections import defaultdict
 
 class TextFileIndexer:
     def __init__(self, data_dir="big_data"):
         """Initialize the indexer with the data directory path."""
         self.data_dir = data_dir
-        self.unigram_index = defaultdict(lambda: defaultdict(int))
-        self.bigram_index = defaultdict(lambda: defaultdict(int))
         # List of specific bigrams to track
         self.selected_bigrams = [
             "computer science",
@@ -29,129 +29,213 @@ class TextFileIndexer:
         word = re.sub(r'\s+', ' ', word)
         return word.strip()
     
-    def tokenize_text(self, text):
-        """Tokenize text into words."""
-        # Normalize the entire text first
-        normalized_text = self.normalize_word(text)
-        # Split by whitespace and filter out empty tokens
-        return [token for token in normalized_text.split() if token.strip()]
-    
-    def process_file(self, file_path, index_type):
-        """Process a single file and update the appropriate index."""
-        try:
-            with open(file_path, 'r', encoding='utf-8') as file:
-                content = file.read().strip()
-                
-                # Extract document ID (first token before tab)
-                parts = content.split('\t', 1)
-                if len(parts) != 2:
-                    print(f"Warning: File {file_path} does not have the expected format.")
-                    return
-                
-                doc_id = parts[0].strip()
-                text = parts[1].strip()
-                tokens = self.tokenize_text(text)
-                
-                if index_type == "unigram":
-                    # Process for unigram index
-                    for token in tokens:
-                        if token:  # Skip empty tokens
-                            self.unigram_index[token][doc_id] += 1
-                
-                elif index_type == "bigram":
-                    # Process for bigram index
-                    for i in range(len(tokens) - 1):
-                        if tokens[i] and tokens[i+1]:  # Skip empty tokens
-                            bigram = f"{tokens[i]} {tokens[i+1]}"
-                            # Only add bigram if it's in our selected list
-                            if bigram in self.selected_bigrams:
-                                self.bigram_index[bigram][doc_id] += 1
-        
-        except Exception as e:
-            print(f"Error processing file {file_path}: {e}")
-    
-    def process_directory(self, directory, index_type):
-        """Process all files in the specified directory."""
-        if not os.path.exists(directory):
-            print(f"Error: Directory {directory} does not exist.")
-            return
-        
-        file_count = 0
-        for filename in os.listdir(directory):
-            if filename.endswith(".txt"):
-                file_path = os.path.join(directory, filename)
-                self.process_file(file_path, index_type)
-                file_count += 1
-        
-        print(f"Processed {file_count} files from {directory}")
-    
-    def create_unigram_index(self):
-        """Create unigram index from files in the fulldata directory."""
-        fulldata_dir = os.path.join(self.data_dir, "fulldata")
-        self.process_directory(fulldata_dir, "unigram")
-    
-    def create_bigram_index(self):
-        """Create bigram index from files in the devdata directory."""
-        devdata_dir = os.path.join(self.data_dir, "devdata")
-        self.process_directory(devdata_dir, "bigram")
-    
-    def write_unigram_index(self, output_file="unigram_index.txt"):
-        """Write the unigram index to a file."""
-        try:
-            with open(output_file, 'w', encoding='utf-8') as file:
-                # Sort words alphabetically
-                sorted_words = sorted(self.unigram_index.keys())
-                
-                for word in sorted_words:
-                    # Format: word, docID:count [docID:count]...
-                    doc_counts = []
-                    for doc_id, count in sorted(self.unigram_index[word].items()):
-                        doc_counts.append(f"{doc_id}:{count}")
-                    
-                    line = f"{word}, {' '.join(doc_counts)}"
-                    file.write(line + "\n")
-            
-            print(f"Unigram index written to {output_file}")
-        
-        except Exception as e:
-            print(f"Error writing unigram index to {output_file}: {e}")
-    
-    def write_bigram_index(self, output_file="selected_bigram_index.txt"):
-        """Write the bigram index to a file."""
-        try:
-            with open(output_file, 'w', encoding='utf-8') as file:
-                # Sort bigrams alphabetically
-                sorted_bigrams = sorted(self.bigram_index.keys())
-                
-                for bigram in sorted_bigrams:
-                    # Format: bigram docID:count docID:count...
-                    doc_counts = []
-                    for doc_id, count in sorted(self.bigram_index[bigram].items()):
-                        doc_counts.append(f"{doc_id}:{count}")
-                    
-                    line = f"{bigram} {' '.join(doc_counts)}"
-                    file.write(line + "\n")
-            
-            print(f"Bigram index written to {output_file}")
-        
-        except Exception as e:
-            print(f"Error writing bigram index to {output_file}: {e}")
-    
     def run(self):
         """Run the full indexing process."""
-        print("Starting Text File Indexing System...")
+        print("Starting Text File Indexing System with MapReduce...")
         
         # Create unigram index
         print("\nCreating unigram index from fulldata directory...")
-        self.create_unigram_index()
-        self.write_unigram_index()
+        self.run_unigram_job()
         
         # Create bigram index
         print("\nCreating selective bigram index from devdata directory...")
-        self.create_bigram_index()
-        self.write_bigram_index()
+        self.run_bigram_job()
         
-        print("\nIndexing completed successfully!")
+        print("\nMapReduce indexing completed successfully!")
+    
+    def run_unigram_job(self):
+        fulldata_dir = os.path.join(self.data_dir, "fulldata")
+        input_files = []
+        for filename in os.listdir(fulldata_dir):
+            if filename.endswith('.txt'):
+                input_files.append(os.path.join(fulldata_dir, filename))
+        
+        # Run the MapReduce job
+        mr_job = UnigramMRJob(args=input_files + ['-o', 'unigram_output'])
+        with mr_job.make_runner() as runner:
+            runner.run()
+            
+            # Extract output and write to file
+            with open('unigram_index.txt', 'w') as output_file:
+                for line in runner.cat_output():
+                    # Process the line
+                    line_str = line.decode('utf-8')
+                    if line_str.startswith('null\t'):
+                        line_str = line_str[5:]
+                    # Remove quotes if present
+                    line_str = line_str.strip()
+                    if line_str.startswith('"') and line_str.endswith('"'):
+                        line_str = line_str[1:-1]
+                    output_file.write(f"{line_str}\n")
+        
+        print(f"Unigram index written to unigram_index.txt")
+    
+    def run_bigram_job(self):
+        devdata_dir = os.path.join(self.data_dir, "devdata")
+        input_files = []
+        for filename in os.listdir(devdata_dir):
+            if filename.endswith('.txt'):
+                input_files.append(os.path.join(devdata_dir, filename))
+        
+        # Run the MapReduce job
+        mr_job = BigramMRJob(args=input_files + 
+                            ['-o', 'bigram_output', 
+                            '--selected-bigrams'] + self.selected_bigrams)
+        with mr_job.make_runner() as runner:
+            runner.run()
+            
+            # Extract output and write to file
+            with open('selected_bigram_index.txt', 'w') as output_file:
+                for line in runner.cat_output():
+                    # Process the line
+                    line_str = line.decode('utf-8')
+                    if line_str.startswith('null\t'):
+                        line_str = line_str[5:]
+                    # Remove quotes if present
+                    line_str = line_str.strip()
+                    if line_str.startswith('"') and line_str.endswith('"'):
+                        line_str = line_str[1:-1]
+                    output_file.write(f"{line_str}\n")
+        
+        print(f"Bigram index written to selected_bigram_index.txt")
+
+class UnigramMRJob(MRJob):
+    """MapReduce job for creating unigram index."""
+    
+    def mapper_init(self):
+        """Initialize the mapper with helper functions."""
+        self.normalize_word = lambda word: re.sub(r'\s+', ' ', re.sub(r'[^\w\s]|[\d]', ' ', word.lower())).strip()
+        self.tokenize_text = lambda text: [token for token in self.normalize_word(text).split() if token.strip()]
+    
+    def mapper(self, _, line):
+        """Map function to process each line (document)."""
+        parts = line.split('\t', 1)
+        if len(parts) != 2:
+            return
+        
+        doc_id = parts[0].strip()
+        text = parts[1].strip()
+        tokens = self.tokenize_text(text)
+        
+        # Emit (word, (doc_id, count)) for each word
+        word_counts = defaultdict(int)
+        for token in tokens:
+            if token:  # Skip empty tokens
+                word_counts[token] += 1
+        
+        for word, count in word_counts.items():
+            yield word, (doc_id, count)
+    
+    def reducer(self, word, doc_counts):
+        """Reduce function to aggregate document counts for each word."""
+        # Combine all document counts for the word
+        result = []
+        doc_count_map = defaultdict(int)
+        
+        for doc_id, count in doc_counts:
+            doc_count_map[doc_id] += count
+        
+        # Sort by document ID
+        for doc_id in sorted(doc_count_map.keys()):
+            result.append(f"{doc_id}:{doc_count_map[doc_id]}")
+        
+        output_line = f"{word}, {' '.join(result)}"
+        yield None, output_line
+    
+    def reducer_final(self, word, values):
+        """Final reducer to format the output."""
+        for value in values:
+            yield None, value
+    
+    def steps(self):
+        return [
+            MRStep(
+                mapper_init=self.mapper_init,
+                mapper=self.mapper,
+                reducer=self.reducer
+            ),
+            MRStep(
+                reducer=self.reducer_final
+            )
+        ]
+
+class BigramMRJob(MRJob):
+    """MapReduce job for creating bigram index."""
+    
+    def configure_args(self):
+        """Add custom command line options."""
+        super(BigramMRJob, self).configure_args()
+        self.add_passthru_arg('--selected-bigrams', dest='selected_bigrams', 
+                            nargs='+', default=[])
+    
+    def mapper_init(self):
+        """Initialize the mapper with helper functions and selected bigrams."""
+        self.normalize_word = lambda word: re.sub(r'\s+', ' ', re.sub(r'[^\w\s]|[\d]', ' ', word.lower())).strip()
+        self.tokenize_text = lambda text: [token for token in self.normalize_word(text).split() if token.strip()]
+        self.selected_bigrams = set(self.options.selected_bigrams)
+    
+    def mapper(self, _, line):
+        """Map function to process each line (document)."""
+        parts = line.split('\t', 1)
+        if len(parts) != 2:
+            return
+        
+        doc_id = parts[0].strip()
+        text = parts[1].strip()
+        tokens = self.tokenize_text(text)
+        
+        # Process bigrams
+        for i in range(len(tokens) - 1):
+            if tokens[i] and tokens[i+1]:  # Skip empty tokens
+                bigram = f"{tokens[i]} {tokens[i+1]}"
+                # Only add bigram if it's in our selected list
+                if bigram in self.selected_bigrams:
+                    yield bigram, (doc_id, 1)
+    
+    def combiner(self, bigram, doc_counts):
+        """Combine values for the same key (bigram, doc_id) from the same mapper."""
+        # Combine counts for the same document
+        doc_count_map = defaultdict(int)
+        for doc_id, count in doc_counts:
+            doc_count_map[doc_id] += count
+        
+        # Emit combined counts
+        for doc_id, count in doc_count_map.items():
+            yield bigram, (doc_id, count)
+    
+    def reducer(self, bigram, doc_counts):
+        """Reduce function to aggregate document counts for each bigram."""
+        # Combine all document counts for the bigram
+        doc_count_map = defaultdict(int)
+        
+        for doc_id, count in doc_counts:
+            doc_count_map[doc_id] += count
+        
+        # Sort by document ID and format the output
+        result = []
+        for doc_id in sorted(doc_count_map.keys()):
+            result.append(f"{doc_id}:{doc_count_map[doc_id]}")
+        
+        output_line = f"{bigram} {' '.join(result)}"
+        yield None, output_line
+    
+    def reducer_final(self, bigram, values):
+        """Final reducer to format the output."""
+        for value in values:
+            yield None, value
+    
+    def steps(self):
+        return [
+            MRStep(
+                mapper_init=self.mapper_init,
+                mapper=self.mapper,
+                combiner=self.combiner,
+                reducer=self.reducer
+            ),
+            MRStep(
+                reducer=self.reducer_final
+            )
+        ]
 
 if __name__ == "__main__":
     # Use command line argument for data_dir if provided
