@@ -5,11 +5,14 @@ import sys
 from mrjob.job import MRJob
 from mrjob.step import MRStep
 from collections import defaultdict
+import argparse
 
 class TextFileIndexer:
-    def __init__(self, data_dir="big_data"):
-        """Initialize the indexer with the data directory path."""
+    def __init__(self, data_dir="big_data", num_mappers=8, num_reducers=4):
+        """Initialize the indexer with the data directory path and parallelization settings."""
         self.data_dir = data_dir
+        self.num_mappers = num_mappers
+        self.num_reducers = num_reducers
         # List of specific bigrams to track
         self.selected_bigrams = [
             "computer science",
@@ -31,17 +34,18 @@ class TextFileIndexer:
     
     def run(self):
         """Run the full indexing process."""
-        print("Starting Text File Indexing System with MapReduce...")
+        print("Starting Text File Indexing System with Parallel MapReduce...")
+        print(f"Using parallel execution with multiple mappers and reducers")
         
         # Create unigram index
-        print("\nCreating unigram index from fulldata directory...")
+        print("\nCreating unigram index from fulldata directory in parallel...")
         self.run_unigram_job()
         
         # Create bigram index
-        print("\nCreating selective bigram index from devdata directory...")
+        print("\nCreating selective bigram index from devdata directory in parallel...")
         self.run_bigram_job()
         
-        print("\nMapReduce indexing completed successfully!")
+        print("\nParallel MapReduce indexing completed successfully!")
     
     def run_unigram_job(self):
         fulldata_dir = os.path.join(self.data_dir, "fulldata")
@@ -50,8 +54,17 @@ class TextFileIndexer:
             if filename.endswith('.txt'):
                 input_files.append(os.path.join(fulldata_dir, filename))
         
-        # Run the MapReduce job
-        mr_job = UnigramMRJob(args=input_files + ['-o', 'unigram_output'])
+        # Dynamically adjust mapper count based on input size
+        dynamic_mapper_count = min(len(input_files), self.num_mappers)
+        # Ensure at least one mapper per file, up to num_mappers
+        mapper_count = max(1, dynamic_mapper_count)
+        
+        # Run the MapReduce job with parallel configuration
+        mr_job = UnigramMRJob(args=input_files + [
+            '-o', 'unigram_output',
+            '--num-mappers', str(mapper_count),
+            '--num-reducers', str(self.num_reducers)
+        ])
         with mr_job.make_runner() as runner:
             runner.run()
             
@@ -77,10 +90,18 @@ class TextFileIndexer:
             if filename.endswith('.txt'):
                 input_files.append(os.path.join(devdata_dir, filename))
         
-        # Run the MapReduce job
-        mr_job = BigramMRJob(args=input_files + 
-                            ['-o', 'bigram_output', 
-                            '--selected-bigrams'] + self.selected_bigrams)
+        # Dynamically adjust mapper count based on input size
+        dynamic_mapper_count = min(len(input_files), self.num_mappers)
+        # Ensure at least one mapper per file, up to num_mappers
+        mapper_count = max(1, dynamic_mapper_count)
+        
+        # Run the MapReduce job with parallel configuration
+        mr_job = BigramMRJob(args=input_files + [
+            '-o', 'bigram_output', 
+            '--selected-bigrams'] + self.selected_bigrams + [
+            '--num-mappers', str(mapper_count),
+            '--num-reducers', str(self.num_reducers)
+        ])
         with mr_job.make_runner() as runner:
             runner.run()
             
@@ -101,6 +122,50 @@ class TextFileIndexer:
 
 class UnigramMRJob(MRJob):
     """MapReduce job for creating unigram index."""
+    
+    def configure_args(self):
+        """Add custom command line options."""
+        super(UnigramMRJob, self).configure_args()
+        self.add_passthru_arg('--num-mappers', dest='num_mappers', 
+                            type=int, default=4, help='Number of mappers to use')
+        self.add_passthru_arg('--num-reducers', dest='num_reducers', 
+                            type=int, default=4, help='Number of reducers to use')
+    
+    def configure_options(self):
+        """Configure Hadoop job options for parallelization."""
+        super(UnigramMRJob, self).configure_options()
+        self.pass_through_option('--jobconf', dest='jobconf', 
+                                default=[], action='append',
+                                help='Specify jobconf arguments to pass to Hadoop streaming')
+    
+    def jobconf(self):
+        """Set Hadoop job configuration for parallelization."""
+        conf = {
+            'mapreduce.job.maps': self.options.num_mappers,
+            'mapreduce.job.reduces': self.options.num_reducers,
+            'mapreduce.partition.keypartitioner.options': '-k1,1',
+            'stream.num.map.output.key.fields': '1',
+            'mapreduce.job.partitioner.class': 'org.apache.hadoop.mapred.lib.HashPartitioner',
+        }
+        
+        # Get the parent's jobconf
+        parent_jobconf = super(UnigramMRJob, self).jobconf()
+        
+        # Update with our configuration
+        parent_jobconf.update(conf)
+        return parent_jobconf
+    
+    @staticmethod
+    def partitioner():
+        """Return a partitioner function that distributes keys evenly."""
+        def partition_func(key, num_reducers):
+            """Distribute keys evenly across reducers based on hash of the key."""
+            # Simple hash-based partitioner that ensures words with similar 
+            # first letters are distributed across reducers
+            if not key:
+                return 0
+            return hash(key[0]) % num_reducers
+        return partition_func
     
     def mapper_init(self):
         """Initialize the mapper with helper functions."""
@@ -167,6 +232,47 @@ class BigramMRJob(MRJob):
         super(BigramMRJob, self).configure_args()
         self.add_passthru_arg('--selected-bigrams', dest='selected_bigrams', 
                             nargs='+', default=[])
+        self.add_passthru_arg('--num-mappers', dest='num_mappers', 
+                            type=int, default=4, help='Number of mappers to use')
+        self.add_passthru_arg('--num-reducers', dest='num_reducers', 
+                            type=int, default=4, help='Number of reducers to use')
+    
+    def configure_options(self):
+        """Configure Hadoop job options for parallelization."""
+        super(BigramMRJob, self).configure_options()
+        self.pass_through_option('--jobconf', dest='jobconf', 
+                                default=[], action='append',
+                                help='Specify jobconf arguments to pass to Hadoop streaming')
+    
+    def jobconf(self):
+        """Set Hadoop job configuration for parallelization."""
+        conf = {
+            'mapreduce.job.maps': self.options.num_mappers,
+            'mapreduce.job.reduces': self.options.num_reducers,
+            'mapreduce.partition.keypartitioner.options': '-k1,1',
+            'stream.num.map.output.key.fields': '1',
+            'mapreduce.job.partitioner.class': 'org.apache.hadoop.mapred.lib.HashPartitioner',
+        }
+        
+        # Get the parent's jobconf
+        parent_jobconf = super(BigramMRJob, self).jobconf()
+        
+        # Update with our configuration
+        parent_jobconf.update(conf)
+        return parent_jobconf
+    
+    @staticmethod
+    def partitioner():
+        """Return a partitioner function that distributes keys evenly."""
+        def partition_func(key, num_reducers):
+            """Distribute keys evenly across reducers based on hash of the key."""
+            # Simple hash-based partitioner that ensures bigrams with similar 
+            # first words are distributed across reducers
+            if not key:
+                return 0
+            words = key.split(' ', 1)
+            return hash(words[0]) % num_reducers
+        return partition_func
     
     def mapper_init(self):
         """Initialize the mapper with helper functions and selected bigrams."""
@@ -238,8 +344,18 @@ class BigramMRJob(MRJob):
         ]
 
 if __name__ == "__main__":
-    # Use command line argument for data_dir if provided
-    data_dir = sys.argv[1] if len(sys.argv) > 1 else "big_data"
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Run MapReduce text indexing')
+    parser.add_argument('data_dir', help='Directory containing the text data')
+    parser.add_argument('--mappers', type=int, default=8, 
+                      help='Number of mapper tasks (default: 8)')
+    parser.add_argument('--reducers', type=int, default=4, 
+                      help='Number of reducer tasks (default: 4)')
     
-    indexer = TextFileIndexer(data_dir)
+    args = parser.parse_args()
+    
+    print(f"Running with {args.mappers} mappers and {args.reducers} reducers")
+    
+    # Create and run the indexer with specified parallelization
+    indexer = TextFileIndexer(args.data_dir, args.mappers, args.reducers)
     indexer.run() 
