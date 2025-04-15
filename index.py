@@ -9,7 +9,15 @@ class TextFileIndexer:
         """Initialize the indexer with the data directory path."""
         self.data_dir = data_dir
         self.unigram_index = defaultdict(lambda: defaultdict(int))
-        self.bigram_index = defaultdict(set)
+        self.bigram_index = defaultdict(lambda: defaultdict(int))
+        # List of specific bigrams to track
+        self.selected_bigrams = [
+            "computer science",
+            "information retrieval",
+            "power politics",
+            "los angeles",
+            "bruce willis"
+        ]
     
     def normalize_word(self, word):
         """Normalize words by converting to lowercase and replacing punctuation and numerals with spaces."""
@@ -55,7 +63,9 @@ class TextFileIndexer:
                     for i in range(len(tokens) - 1):
                         if tokens[i] and tokens[i+1]:  # Skip empty tokens
                             bigram = f"{tokens[i]} {tokens[i+1]}"
-                            self.bigram_index[bigram].add(doc_id)
+                            # Only add bigram if it's in our selected list
+                            if bigram in self.selected_bigrams:
+                                self.bigram_index[bigram][doc_id] += 1
         
         except Exception as e:
             print(f"Error processing file {file_path}: {e}")
@@ -114,10 +124,13 @@ class TextFileIndexer:
                 sorted_bigrams = sorted(self.bigram_index.keys())
                 
                 for bigram in sorted_bigrams:
-                    # Format: word1 word2, docID
-                    for doc_id in sorted(self.bigram_index[bigram]):
-                        line = f"{bigram}, {doc_id}"
-                        file.write(line + "\n")
+                    # Format: bigram docID:count docID:count...
+                    doc_counts = []
+                    for doc_id, count in sorted(self.bigram_index[bigram].items()):
+                        doc_counts.append(f"{doc_id}:{count}")
+                    
+                    line = f"{bigram} {' '.join(doc_counts)}"
+                    file.write(line + "\n")
             
             print(f"Bigram index written to {output_file}")
         
